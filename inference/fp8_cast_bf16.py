@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from argparse import ArgumentParser
 from glob import glob
 from tqdm import tqdm
@@ -8,6 +9,55 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from kernel import weight_dequant
+
+def setup_logging():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def load_model_index(fp8_path):
+    model_index_file = os.path.join(fp8_path, "model.safetensors.index.json")
+    with open(model_index_file, "r") as f:
+        model_index = json.load(f)
+    return model_index
+
+def get_tensor(tensor_name, loaded_files, weight_map, fp8_path):
+    """
+    Retrieves a tensor from the cached safetensor files or loads it from disk if not cached.
+
+    Args:
+        tensor_name (str): The name of the tensor to retrieve.
+        loaded_files (dict): Cache for loaded safetensor files.
+        weight_map (dict): Mapping of tensor names to file paths.
+        fp8_path (str): The path to the directory containing the FP8 weights.
+
+    Returns:
+        torch.Tensor: The retrieved tensor.
+    """
+    file_path = os.path.join(fp8_path, weight_map[tensor_name])
+    if file_path not in loaded_files:
+        loaded_files[file_path] = load_file(file_path)
+    return loaded_files[file_path][tensor_name]
+
+def convert_weights(fp8_path, bf16_path, weight_map):
+    os.makedirs(bf16_path, exist_ok=True)
+    loaded_files = {}
+    bf16_weight_map = {}
+
+    for tensor_name in tqdm(weight_map.keys(), desc="Converting weights"):
+        try:
+            tensor = get_tensor(tensor_name, loaded_files, weight_map, fp8_path)
+            if "scale_inv" in tensor_name:
+                continue
+            bf16_tensor = weight_dequant(tensor)
+            bf16_weight_map[tensor_name] = bf16_tensor
+        except KeyError as e:
+            logging.error(f"Missing required tensor: {e}")
+            raise
+
+    return bf16_weight_map
+
+def save_converted_weights(bf16_weight_map, bf16_path):
+    for tensor_name, tensor in bf16_weight_map.items():
+        save_file({tensor_name: tensor}, os.path.join(bf16_path, f"{tensor_name}.safetensors"))
 
 def main(fp8_path, bf16_path):
     """
@@ -29,84 +79,25 @@ def main(fp8_path, bf16_path):
     - The function caches loaded safetensor files to optimize memory usage.
     - The function updates the model index file to remove references to scale_inv tensors.
     """
+    setup_logging()
     torch.set_default_dtype(torch.bfloat16)
-    os.makedirs(bf16_path, exist_ok=True)
-    model_index_file = os.path.join(fp8_path, "model.safetensors.index.json")
-    with open(model_index_file, "r") as f:
-        model_index = json.load(f)
+    
+    logging.info("Loading model index...")
+    model_index = load_model_index(fp8_path)
     weight_map = model_index["weight_map"]
     
-    # Cache for loaded safetensor files
-    loaded_files = {}
-    fp8_weight_names = []
-
-    # Helper function to get tensor from the correct file
-    def get_tensor(tensor_name):
-        """
-        Retrieves a tensor from the cached safetensor files or loads it from disk if not cached.
-
-        Args:
-            tensor_name (str): The name of the tensor to retrieve.
-
-        Returns:
-            torch.Tensor: The retrieved tensor.
-
-        Raises:
-            KeyError: If the tensor does not exist in the safetensor file.
-        """
-        file_name = weight_map[tensor_name]
-        if file_name not in loaded_files:
-            file_path = os.path.join(fp8_path, file_name)
-            loaded_files[file_name] = load_file(file_path, device="cuda")
-        return loaded_files[file_name][tensor_name]
-
-    safetensor_files = list(glob(os.path.join(fp8_path, "*.safetensors")))
-    safetensor_files.sort()
-    for safetensor_file in tqdm(safetensor_files):
-        file_name = os.path.basename(safetensor_file)
-        current_state_dict = load_file(safetensor_file, device="cuda")
-        loaded_files[file_name] = current_state_dict
-        
-        new_state_dict = {}
-        for weight_name, weight in current_state_dict.items():
-            if weight_name.endswith("_scale_inv"):
-                continue
-            elif weight.element_size() == 1:  # FP8 weight
-                scale_inv_name = f"{weight_name}_scale_inv"
-                try:
-                    # Get scale_inv from the correct file
-                    scale_inv = get_tensor(scale_inv_name)
-                    fp8_weight_names.append(weight_name)
-                    new_state_dict[weight_name] = weight_dequant(weight, scale_inv)
-                except KeyError:
-                    print(f"Warning: Missing scale_inv tensor for {weight_name}, skipping conversion")
-                    new_state_dict[weight_name] = weight
-            else:
-                new_state_dict[weight_name] = weight
-                
-        new_safetensor_file = os.path.join(bf16_path, file_name)
-        save_file(new_state_dict, new_safetensor_file)
-        
-        # Memory management: keep only the 2 most recently used files
-        if len(loaded_files) > 2:
-            oldest_file = next(iter(loaded_files))
-            del loaded_files[oldest_file]
-            torch.cuda.empty_cache()
+    logging.info("Converting weights...")
+    bf16_weight_map = convert_weights(fp8_path, bf16_path, weight_map)
     
-    # Update model index
-    new_model_index_file = os.path.join(bf16_path, "model.safetensors.index.json")
-    for weight_name in fp8_weight_names:
-        scale_inv_name = f"{weight_name}_scale_inv"
-        if scale_inv_name in weight_map:
-            weight_map.pop(scale_inv_name)
-    with open(new_model_index_file, "w") as f:
-        json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
-        
+    logging.info("Saving converted weights...")
+    save_converted_weights(bf16_weight_map, bf16_path)
+    
+    logging.info("Conversion completed successfully.")
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("--input-fp8-hf-path", type=str, required=True)
-    parser.add_argument("--output-bf16-hf-path", type=str, required=True)
+    parser = ArgumentParser(description="Convert FP8 weights to BF16")
+    parser.add_argument("--input-fp8-hf-path", type=str, required=True, help="Path to the directory containing the FP8 weights")
+    parser.add_argument("--output-bf16-hf-path", type=str, required=True, help="Path to the directory where the converted BF16 weights will be saved")
     args = parser.parse_args()
-    main(args.input_fp8_hf_path, args.output_bf16_hf_path)
     
+    main(args.input_fp8_hf_path, args.output_bf16_hf_path)

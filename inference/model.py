@@ -126,12 +126,8 @@ class ParallelEmbedding(nn.Module):
         return y
 
 
-def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def linear(x, weight, bias=None):
     """
-    Applies a linear transformation to the incoming data: y = xA^T + b.
-    This function supports specialized implementations based on quantization
-    and tensor formats.
-
     Args:
         x (torch.Tensor): The input tensor.
         weight (torch.Tensor): The weight tensor. It may be quantized and 

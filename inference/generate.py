@@ -10,6 +10,26 @@ from safetensors.torch import load_model
 
 from model import Transformer, ModelArgs
 
+def setup_logging():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def main():
+    setup_logging()
+    try:
+        # ...existing code...
+        logging.info("Model yükleniyor...")
+        model = load_model(ckpt_path, config)
+        logging.info("Model başarıyla yüklendi.")
+        
+        # ...existing code...
+        logging.info("Metin üretimi başlatılıyor...")
+        generated_text = model.generate(input_text, max_new_tokens=max_new_tokens, temperature=temperature)
+        logging.info("Metin üretimi tamamlandı.")
+        print(generated_text)
+    except Exception as e:
+        logging.error(f"Bir hata oluştu: {e}")
+        raise
+
 
 def sample(logits, temperature: float = 1.0):
     """

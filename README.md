@@ -355,5 +355,15 @@ This code repository is licensed under [the MIT License](LICENSE-CODE). The use 
 }
 ```
 
+# DeepSeek-V3
+
+## Proje Hakkında
+DeepSeek-V3, büyük ölçekli bir Mixture-of-Experts (MoE) dil modelidir. Bu model, dil anlama ve üretme görevlerinde yüksek performans göstermeyi amaçlar.
+
+## Gereksinimler
+Proje için gerekli Python paketlerini yüklemek için:
+```sh
+pip install -r inference/requirements.txt
+
 ## 9. Contact
 If you have any questions, please raise an issue or contact us at [service@deepseek.com](service@deepseek.com).
